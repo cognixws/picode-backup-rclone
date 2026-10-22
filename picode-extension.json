@@ -1,0 +1,19 @@
+{
+  "id": "picode-backup-rclone",
+  "name": "More storage (rclone)",
+  "version": "0.1.0",
+  "apiVersion": 15,
+  "publisher": "COGNIX[WS]",
+  "description": "Keeps encrypted copies of your COGNIX[WS] backups in Dropbox, OneDrive, an SFTP server or WebDAV (Nextcloud, ownCloud), through rclone. COGNIX[WS] encrypts everything before it leaves this computer; the storage never sees what is inside.",
+  "icon": "ui/icon.svg",
+  "activation": { "instance": true },
+  "settings": [
+    { "key": "storage_1", "label": "Storage 1", "type": "secret", "writer": "process", "description": "Kept by the extension when you add a storage on its page. Removing it removes that storage; the copies already there stay." },
+    { "key": "storage_2", "label": "Storage 2", "type": "secret", "writer": "process", "description": "Kept by the extension when you add a storage on its page." },
+    { "key": "storage_3", "label": "Storage 3", "type": "secret", "writer": "process", "description": "Kept by the extension when you add a storage on its page." },
+    { "key": "storage_4", "label": "Storage 4", "type": "secret", "writer": "process", "description": "Kept by the extension when you add a storage on its page." }
+  ],
+  "process": { "command": "node", "args": ["${extensionDir}/server.mjs"] },
+  "ui": { "pages": [{ "id": "storages", "title": "More storage", "path": "ui/index.html" }] },
+  "backup": { "name": "More storage (rclone)", "where": "internet", "repositoryPath": "/repo", "statusPath": "/status" }
+}
