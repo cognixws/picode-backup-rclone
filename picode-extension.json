@@ -1,7 +1,7 @@
 {
   "id": "picode-backup-rclone",
   "name": "More storage (rclone)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "apiVersion": 15,
   "publisher": "COGNIX[WS]",
   "description": "Keeps encrypted copies of your COGNIX[WS] backups in Dropbox, OneDrive, an SFTP server or WebDAV (Nextcloud, ownCloud), through rclone. COGNIX[WS] encrypts everything before it leaves this computer; the storage never sees what is inside.",

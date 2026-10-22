@@ -104,6 +104,8 @@ async function add(input) {
       await save(null, storage);
       signing = null;
     }).catch((e) => {
+      // Its cause, for the process log: never a token (rclone's output is not kept).
+      console.error("sign-in failed: " + (e?.message || "unknown"));
       failed = e.message === "busy" ? "Another sign-in is still open on this computer. Finish or close it, then try again." : e instanceof StorageError ? e.message : "The sign-in did not finish. Try again.";
       if (signing === mine) { signing = null; lastError = failed; }
     });
@@ -141,7 +143,7 @@ function scanHostKeys(host, port) {
 // oneDriveOf asks Microsoft which drive the token reaches (rclone needs it).
 async function oneDriveOf(token) {
   const r = await fetch("https://graph.microsoft.com/v1.0/me/drive?$select=id,driveType", { headers: { authorization: "Bearer " + token.access_token }, signal: AbortSignal.timeout(20_000) });
-  if (!r.ok) throw new Error("drive");
+  if (!r.ok) throw new Error("Microsoft did not say which drive this sign-in reaches (HTTP " + r.status + ")");
   const d = await r.json();
   if (!d.id || !d.driveType) throw new Error("drive");
   return { drive_id: d.id, drive_type: d.driveType };
