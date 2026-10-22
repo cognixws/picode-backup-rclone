@@ -42,3 +42,5 @@ form[data-form]{display:grid;gap:12px}
 .chk{display:flex;gap:8px;align-items:flex-start}
 .chk input{margin-top:3px}
 .chk small{display:block}
+.fld input:focus-visible,.fld select:focus-visible{outline:2px solid var(--pc-accent);outline-offset:1px}
+.fld small{font-size:12px}

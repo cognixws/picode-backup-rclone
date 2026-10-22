@@ -1,0 +1,20 @@
+name: test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: The pinned rclone
+        run: |
+          curl -fsSL -o rclone.zip https://github.com/rclone/rclone/releases/download/v1.74.3/rclone-v1.74.3-linux-amd64.zip
+          echo "dbee7ccd7a5d617e4ed4cd4555c16669b511abfe8d31164f61be35ac9e999bd2  rclone.zip" | sha256sum -c -
+          unzip -q -j rclone.zip '*/rclone' -d "$RUNNER_TEMP/rclone"
+          echo "$RUNNER_TEMP/rclone" >> "$GITHUB_PATH"
+      - name: Tests and the conformance kit (through rclone to SFTP and WebDAV on this machine)
+        run: node --test test/*.test.mjs

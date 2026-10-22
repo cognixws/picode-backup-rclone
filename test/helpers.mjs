@@ -61,10 +61,12 @@ export const RCLONE = process.env.RCLONE_BIN || execFileSync("sh", ["-c", "comma
 
 // serveRemote runs `rclone serve sftp|webdav` over a temporary folder: a
 // storage to add, with its own user and password.
-export async function serveRemote(kind) {
+export async function serveRemote(kind, port = 30000 + Math.floor(Math.random() * 20000)) {
   const dir = mkdtempSync(join(tmpdir(), "rc-" + kind + "-"));
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  const child = spawn(RCLONE, ["serve", kind, dir, "--addr", "127.0.0.1:" + port, "--user", "tester", "--pass", "tester-pass", "--config", join(dir, "none.conf")], { stdio: "ignore" });
+  // Each server gets a key of its own (SFTP), as a different machine would.
+  const args = ["serve", kind, dir, "--addr", "127.0.0.1:" + port, "--user", "tester", "--pass", "tester-pass", "--config", join(dir, "none.conf")];
+  if (kind === "sftp") { execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", join(dir, "hostkey")]); args.push("--key", join(dir, "hostkey")); }
+  const child = spawn(RCLONE, args, { stdio: "ignore" });
   await new Promise((r) => setTimeout(r, 1200));
   return { dir, port, stop: () => child.kill() };
 }

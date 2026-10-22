@@ -3,13 +3,14 @@
 // grows. The core encrypts every object before it reaches this process;
 // each storage holds only encrypted copies.
 import http from "node:http";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import { Door, send } from "./lib/door.mjs";
 import { HostAPI } from "./lib/host.mjs";
 import { authorize, baseEnv, ensureBinary, obscure, run } from "./lib/rclone.mjs";
-import { SLOTS, StorageError, TYPES, env as storageEnv, newID, remoteName, validate, view } from "./lib/storages.mjs";
+import { SLOTS, StorageError, TYPES, env as storageEnv, lean, newID, remoteName, validate, view } from "./lib/storages.mjs";
 
 const env = process.env;
 const required = ["PICODE_URL", "PICODE_EXT_TOKEN", "PICODE_EXT_DATA", "PICODE_EXT_PORT", "PICODE_EXT_PROXY_SECRET"];
@@ -44,11 +45,28 @@ async function load() {
   return slots;
 }
 const storages = async () => Object.values(await load());
-const door = new Door({ storages, bin, dataDir });
+// An SFTP server's keys, recorded when it was added, are written where
+// rclone checks them (public keys only; nothing secret).
+async function hostKeys(storage) {
+  if (storage.type !== "sftp" || !storage.hostKeys) return "";
+  const dir = join(dataDir, "known_hosts");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = join(dir, storage.id);
+  writeFileSync(file, storage.hostKeys, { mode: 0o600 });
+  return file;
+}
+const door = new Door({ storages, bin, dataDir, hostKeys });
 // Pieces of uploads cut short by a stop are not kept.
 rmSync(join(dataDir, "staging"), { recursive: true, force: true });
 
+// save keeps a storage in a free slot chosen now (a sign-in that ends late
+// never takes the slot of a storage added meanwhile), or clears one.
 async function save(slot, storage) {
+  if (storage && !slot) {
+    const all = await load();
+    slot = SLOTS.find((k) => !all[k]);
+    if (!slot) throw new StorageError("Four storages at most: remove one to add another.");
+  }
   const value = storage ? JSON.stringify(storage) : "";
   if (value.length > 4096) throw new StorageError("This storage's sign-in is too large to keep.");
   if (storage) await host.request(`/api/ext/v1/secrets/${slot}`, { method: "PUT", body: { value } });
@@ -66,8 +84,7 @@ let lastError = "";
 async function add(input) {
   const s = validate(input);
   const all = await load();
-  const slot = SLOTS.find((k) => !all[k]);
-  if (!slot) throw new StorageError("Four storages at most: remove one to add another.");
+  if (!SLOTS.some((k) => !all[k])) throw new StorageError("Four storages at most: remove one to add another.");
   const b = await bin();
   const storage = { id: newID(), ...s };
   if (TYPES[s.type].signIn) {
@@ -75,33 +92,50 @@ async function add(input) {
     lastError = "";
     let linkSeen;
     const linkReady = new Promise((r) => { linkSeen = r; });
-    const flow = authorize(b, baseEnv(dataDir), s.type, (link) => linkSeen(link));
+    const flow = authorize(b, baseEnv(), s.type, (link) => linkSeen(link));
     signing = { type: s.type, name: s.name, link: "", cancel: flow.cancel };
     const mine = signing;
+    let failed = "";
     flow.done.then(async (token) => {
       if (signing !== mine) return; // cancelled, or another sign-in started
-      storage.options = { token };
+      storage.options = { token: lean(token) };
       if (s.type === "onedrive") Object.assign(storage.options, await oneDriveOf(token));
-      await save(slot, storage);
+      if (signing !== mine) return;
+      await save(null, storage);
       signing = null;
-    }).catch(() => {
-      if (signing === mine) { signing = null; lastError = "The sign-in did not finish. Try again."; }
+    }).catch((e) => {
+      failed = e.message === "busy" ? "Another sign-in is still open on this computer. Finish or close it, then try again." : e instanceof StorageError ? e.message : "The sign-in did not finish. Try again.";
+      if (signing === mine) { signing = null; lastError = failed; }
     });
-    const link = await Promise.race([linkReady, new Promise((r) => setTimeout(() => r(""), 15_000))]);
-    if (!link) { flow.cancel(); signing = null; throw new StorageError("rclone did not start the sign-in. Try again."); }
+    const link = await Promise.race([linkReady, flow.done.then(() => "", () => ""), new Promise((r) => setTimeout(() => r(""), 15_000))]);
+    if (!link) { flow.cancel(); if (signing === mine) signing = null; throw new StorageError(failed || "rclone did not start the sign-in. Try again."); }
     mine.link = link;
     return { link };
   }
   // A password storage: rclone keeps the password obscured, and the storage
   // must answer before it is kept.
-  storage.options.pass = await obscure(b, baseEnv(dataDir), storage.options.pass);
+  storage.options.pass = await obscure(b, baseEnv(), storage.options.pass);
+  // An SFTP server's keys are recorded now and checked on every connection
+  // after (trust on first use), so no one in between can pose as it.
+  if (s.type === "sftp") storage.hostKeys = await scanHostKeys(storage.options.host, storage.options.port);
   try {
-    await run(b, ["lsf", remoteName(storage) + ":", "--max-depth", "1"], { env: { ...baseEnv(dataDir), ...storageEnv(storage) }, timeoutMs: 30_000 });
+    await run(b, ["lsf", remoteName(storage) + ":", "--max-depth", "1"], { env: { ...baseEnv(), ...storageEnv(storage, await hostKeys(storage)) }, timeoutMs: 30_000 });
   } catch {
     throw new StorageError(s.type === "sftp" ? "The server refused this user and password, or did not answer." : "The address refused this user and password, or did not answer.");
   }
-  await save(slot, storage);
+  await save(null, storage);
   return { added: storage.id };
+}
+
+// scanHostKeys asks ssh-keyscan for an SFTP server's keys ("" when it is not
+// installed: then rclone connects without checking, as it does by default).
+function scanHostKeys(host, port) {
+  return new Promise((resolve) => {
+    execFile("ssh-keyscan", ["-p", String(port), "-T", "10", "--", host], { timeout: 15_000 }, (err, stdout) => {
+      const lines = String(stdout || "").split("\n").filter((l) => l && !l.startsWith("#"));
+      resolve(err && !lines.length ? "" : lines.join("\n") + (lines.length ? "\n" : ""));
+    });
+  });
 }
 
 // oneDriveOf asks Microsoft which drive the token reaches (rclone needs it).

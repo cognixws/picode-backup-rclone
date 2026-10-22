@@ -103,3 +103,78 @@ test("what the page sends is checked; a folder is plain names; the place follows
   assert.equal(a.id, renamed.id);
   assert.match(a.id, /^rc-[0-9a-f]{16}$/);
 });
+
+import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Door } from "../lib/door.mjs";
+import { RCLONE } from "./helpers.mjs";
+
+const children = () => execFileSync("ps", ["-eo", "pid,args"]).toString().split("\n");
+
+test("concurrent first requests share one rclone server, and its password is never on a command line", { timeout: 60_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rc-local-"));
+  const storage = { id: "c0ffee01", type: "local", name: "L", folder: dir, options: {} };
+  const door = new Door({ storages: async () => [storage], bin: async () => RCLONE, dataDir: dir });
+  try {
+    const servers = await Promise.all(Array.from({ length: 8 }, () => door.server(storage)));
+    assert.equal(new Set(servers.map((s) => s.port)).size, 1);
+    const mine = children().filter((l) => l.includes("serve restic") && l.includes(dir));
+    assert.equal(mine.length, 1, mine.join("\n"));
+    assert.ok(!mine[0].includes(servers[0].auth) && !mine[0].includes("--pass"), "the server's password is on its command line");
+  } finally { door.stopAll(); }
+});
+
+test("a read the core cancels before the storage answers frees its connection", { timeout: 60_000 }, async () => {
+  // A storage that answers late with a large object, a slice at a time (a
+  // pack); ?fast answers at once.
+  const slow = await new Promise((r) => { const s = createServer((req, res) => {
+    if (req.url.includes("fast")) { res.writeHead(200, { "Content-Length": 2 }); return res.end("ok"); }
+    setTimeout(() => {
+      res.writeHead(200, { "Content-Length": 64 << 20 });
+      const slice = Buffer.alloc(1 << 20);
+      let sent = 0;
+      const more = () => { while (sent < 64 && res.write(slice)) sent++; if (sent < 64) res.once("drain", () => { sent++; more(); }); else res.end(); };
+      res.on("error", () => {});
+      more();
+    }, 1500);
+  }).listen(0, "127.0.0.1", () => r(s)); });
+  const door = new Door({ storages: async () => [{ id: "aaaaaaaa", type: "local", name: "L", folder: "x", options: {} }], bin: async () => RCLONE, dataDir: tmpdir() });
+  door.server = async () => ({ port: slow.address().port, auth: "x" });
+  const front = await new Promise((r) => { const s = createServer((req, res) => door.handle(req, res, req.url.split("/")[2], "r", "/keys/" + "a".repeat(64))).listen(0, "127.0.0.1", () => r(s)); });
+  const { connectionOf } = await import("../lib/storages.mjs");
+  const conn = connectionOf({ id: "aaaaaaaa", name: "L", folder: "x" }).id;
+  try {
+    await Promise.all(Array.from({ length: 20 }, () => new Promise((resolve) => {
+      const req = request(`http://127.0.0.1:${front.address().port}/repo/${conn}/r/keys/${"a".repeat(64)}`);
+      req.on("error", () => resolve());
+      req.end();
+      setTimeout(() => { req.destroy(); resolve(); }, 300);
+    })));
+    const t = Date.now();
+    const res = await fetch(`http://127.0.0.1:${front.address().port}/repo/${conn}/r/keys/${"a".repeat(64)}?fast=1`, { signal: AbortSignal.timeout(5000) });
+    assert.equal(res.status, 200);
+    assert.ok(Date.now() - t < 5000, "the next read waited " + (Date.now() - t) + " ms");
+  } finally { slow.closeAllConnections(); slow.close(); front.closeAllConnections(); front.close(); }
+});
+
+test("an SFTP server whose key changed is refused", { timeout: 120_000 }, async () => {
+  const first = await serveRemote("sftp");
+  const s = await storage();
+  try {
+    assert.equal((await s.page("/storages", "POST", { type: "sftp", name: "NAS", fields: sftpFields(first) })).status, 200);
+    assert.equal((await s.status()).state, "ready");
+    first.stop();
+    // Another server answers on the same address, with a key of its own.
+    const impostor = await serveRemote("sftp", first.port);
+    try {
+      const again = await storage(s.host.secrets);
+      try {
+        const st = await again.status();
+        assert.notEqual(st.state, "ready", "a server with another key was trusted: " + JSON.stringify(st));
+      } finally { again.stop(); }
+    } finally { impostor.stop(); }
+  } finally { s.stop(); first.stop(); }
+});
